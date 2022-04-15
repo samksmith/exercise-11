@@ -1,0 +1,210 @@
+---
+title: "exercise-11"
+author: "Sam Smith"
+date: "4/15/2022"
+output: html_document
+---
+
+Load in the dataset, filter for certain variables, and do exploratory analyses
+```{r}
+library(tidyverse)
+library(dplyr)
+library(skimr)
+library(patchwork)
+f <- "https://raw.githubusercontent.com/difiore/ada-2022-datasets/main/AVONETdataset1.csv"
+d <- read_csv(f,col_names=TRUE)
+names(d)
+new_df <- d %>% select(Species1, Family1, Order1, Beak.Length_Culmen, Beak.Width, Beak.Depth, Tarsus.Length, Wing.Length, Tail.Length, Mass, Habitat, Migration, Trophic.Level, Trophic.Niche, Min.Latitude, Max.Latitude, Centroid.Latitude, Primary.Lifestyle, Range.Size)
+
+skim(new_df)
+```
+
+For the filtered dataset, there are 8 categorical variables and 12 numeric. The categorical are species, family, order, habitat, trophic level and niche, and primary lifestyle. The numeric variables are the beak measurements (length, width, depth), tarsus length, tail length, mass, migration, minimum, maximum, and centroid latitude, and range size.
+
+## One factor ANOVA and inference
+
+Making boxplots of log(mass) vs trophic level and migration.
+```{r}
+p1 <- ggplot(data=new_df %>% drop_na(Trophic.Level),aes(x=Trophic.Level,y=log(Mass))) +
+  geom_boxplot() + xlab("Trophic Level") + ylab("log(body mass)")
+
+p2 <- ggplot(data=new_df %>% drop_na(Migration),aes(x=as.factor(Migration),y=log(Mass))) + geom_boxplot() +
+  xlab("Migration") + ylab("log(body mass)")
+
+p1+p2
+```
+
+What is the relationship between log(mass) and trophic level? 
+What is the relationship between log(mass) and migration?
+
+```{r}
+m1 <- lm(log(Mass) ~ Trophic.Level, data = new_df)
+m2 <- lm(log(Mass) ~ as.factor(Migration),data = new_df)
+
+summary(m1)
+summary(m2)
+```
+
+Log(mass) is associated with both trophic level and migration status. The F statistic is definitely large enough to reject the null hypotheses. In both linear models, the p-value is extremely low. However, the adjusted R squared values are also quite low for both models suggesting that knowing the trophic level or migration category allows you to explain very little of the overall variance in log(mass). For model 1, the reference level is carnivores, and all trophic levels except the Omnivore level, are different from the reference level based on p-values. For model 2, migration status 1 is the reference level and all other migration statuses differ from the reference (all coefficients are significant).
+
+Relevel and assess the differences among the remaining pair of migration categories
+```{r}
+new_df <- new_df %>% mutate(Migration = relevel(as.factor(Migration),ref="3"))
+m2 <- lm(log(Mass) ~ Migration,data=new_df)
+summary(m2)
+```
+
+Again, all coefficients are significant and all levels differ from the reference (which is now 3 instead of 1). The coefficient for migration 1 is  negative which makes sense because in the previous model, the migration 3 coefficient was positive. Now that I have swapped the reference, I expected that the sign would swap as well.
+
+Post-hoc Tukey Significant Differences test to evaluate which migration categories significantly differ.
+```{r}
+m <- aov(log(Mass) ~ Migration,data=new_df)
+(posthoc <- TukeyHSD(m,which="Migration",ordered=TRUE,conf.level=0.95))
+plot(posthoc, xlim = c(-1, 2))
+```
+
+All categories significantly differ from one another. This can be visualized on the graph, which shows that none of the confidence intervals cross zero (dotted line).
+
+Generate a null distribution of F statistic values using permutation for the model log(mass) ~ trophic level. 
+```{r}
+library(broom)
+original.F <- aov(log(Mass) ~ Trophic.Level, data=new_df) %>% tidy() %>% 
+  filter(term == "Trophic.Level")
+
+# shuffle up mass or trophic level and recalc F stats - generate distribution of F stats and compare our f stat
+library(infer)
+new_df <- new_df %>% mutate(logMass = log(Mass))
+permuted.F <- new_df %>%
+  specify(logMass ~ Trophic.Level) %>%
+  hypothesize(null = "independence") %>%
+  generate(reps = 1000, type = "permute") %>%
+  calculate(stat = "F")
+
+visualize(permuted.F) + shade_p_value(obs_stat = original.F$statistic, direction = "greater")
+p.value <- permuted.F %>% get_p_value(obs_stat = original.F$statistic, direction = "greater")
+original.F$p.value
+```
+
+The original F stat is way outside of the distribution of F statistics generated from the permutation test suggesting it is highly unlikely we got this F stat by chance -- we can reject the null and propose a relationship between trophic level and log(mass).
+
+## data wrangling, one- and two-factor ANOVA
+
+Create two new variables and add to dataset
+```{r}
+new_df <- new_df %>% mutate(logMass = log(Mass),logBeakLength = log(Beak.Length_Culmen),logTarsus = log(Tarsus.Length))
+
+# run models to get residuals
+relbeak_lm <- lm(logBeakLength ~ logMass,data=new_df)
+reltarsus_lm <- lm(logTarsus ~ logMass, data=new_df)
+
+# add residuals to dataframe
+new_df <- new_df %>% mutate(relBeakLength = as.numeric(relbeak_lm$residuals),
+                            relTarsus = as.numeric(reltarsus_lm$residuals))
+```
+
+Boxplot of relative tarsus length vs primary lifestyle 
+boxplot of relative beak length vs trophic niche
+
+```{r}
+p1 <- ggplot(data=new_df,aes(x=Primary.Lifestyle,y=relTarsus)) + geom_boxplot() + xlab("Primary Lifestyle") +
+  ylab("relative tarsus length")
+p2 <- ggplot(data=new_df,aes(x=Trophic.Niche,y=relBeakLength)) + geom_boxplot() + xlab("Trophic Niche") + 
+  ylab("relative beak Length")
+p1 + p2
+```
+
+Run an ANOVA - geographic range size and migration. First, does range size need to be transformed?
+```{r}
+library(mosaic)
+library(cowplot)
+library(ggpubr)
+h1 <- histogram(new_df$Range.Size)
+h2 <- histogram(log(new_df$Range.Size))
+plot_grid(h1,h2)
+
+m1 <- lm(Range.Size ~ Migration,data=new_df)
+plot(fitted(m1),residuals(m1))
+histogram(residuals(m1))
+ggqqplot(residuals(m1))
+
+m2 <- lm(log(Range.Size) ~ Migration,data=new_df)
+plot(fitted(m2),residuals(m2))
+histogram(residuals(m2))
+ggqqplot(residuals(m2))
+```
+
+From the histogram of the raw range size data, it is clear that the data are very right skewed (and bounded by zero, since you can't have a negative range size). It looks like it follows a log distribution rather than normal. If we look at the diagnostic plots from m1 (where I have used raw range values), the diagnostic plots look concerning. For example, there is a really big increase in the fitted vs residual values as fitted values increase and the QQ plot looks crazy at large theoretical quantiles. Log transforming the data helps as can be seen with the m2 diagnostic plots. 
+
+```{r}
+summary(m2)
+```
+
+Range size is associated with migration. When I look at the summary of the model, there is a huge F stat and a tiny p-value. All migration statuses are significantly associated with log range size. The reference level is migration status 3 (since I had releveled earlier). Migration status explains about 8.7% of variance in log(range size).
+
+Now I will relevel the data and assess differences among migration categories.
+
+```{r}
+new_df <- new_df %>% mutate(Migration = relevel(as.factor(Migration),ref="1"))
+m <- lm(log(Range.Size) ~ Migration,data=new_df)
+summary(m)
+m <- aov(log(Range.Size) ~ Migration,data=new_df)
+(posthoc <- TukeyHSD(m,which="Migration",ordered=TRUE,conf.level=0.95))
+plot(posthoc, xlim = c(-1, 4))
+```
+
+All associations are still significant (as expected), now that I have releveled such that the reference is Migration category 1 again. Using a post-hock Tukey HSD test, I see that all migration categories significantly differ from each other. The graph shows that no CIs cross zero.
+
+Just include Passeriform birds and run ANOVA analyses looking at 1) relative beak length vs primary lifestyle and 2) relative beak length and trophic level. Making boxplots and run linear models.
+
+```{r}
+# limit data to Passeriformes
+Passeriformes <- new_df %>% filter(Order1 == "Passeriformes")
+
+# boxplots of response variable by each predictor
+ggplot(data=Passeriformes,aes(x=Primary.Lifestyle,y=relBeakLength)) + geom_boxplot() + xlab("Primary Lifestyle") +
+  ylab("relative Beak length") + ggtitle("Passeriformes")
+ggplot(data=Passeriformes,aes(x=Trophic.Level,y=relBeakLength)) + geom_boxplot() + xlab("Trophic Level") + 
+  ylab("relative Beak Length") + ggtitle("Passeriformes")
+
+# boxplot of response variable by combination of predictors
+ggplot(data=Passeriformes,aes(x=Trophic.Level,y=relBeakLength,fill=Primary.Lifestyle)) + geom_boxplot() + 
+  xlab("Trophic Level") + ylab("relative beak length") + ggtitle("Passeriformes")
+
+# ANOVAs of single predictors
+m1 <- lm(relBeakLength ~ as.factor(Primary.Lifestyle),data=Passeriformes)
+m2 <- lm(relBeakLength ~ as.factor(Trophic.Level),data=Passeriformes)
+# ANOVA with both predictors
+m3 <- lm(relBeakLength ~ as.factor(Primary.Lifestyle) + as.factor(Trophic.Level),data=Passeriformes)
+summary(m1)
+summary(m2)
+summary(m3)
+```
+
+Primary lifestyle is associated with relative beak length (all categories significant) and when we do a single predictor model, primary lifestyle explains about 5.5% of the variation in relative beak length. Trophic level is also associated with relative beak length, but not for all levels. Only herbivore and omnivore levels are associated with relative beak length, carnivore is not. In the single predictor model, trophic level explains about 5% of the variation in relative beak length. The two predictor model is an improvement on the single predictor models because it explains more of the variation in beak length (~11%). All levels are significantly associated except omnivore.
+
+In a final model, include an interaction term between the predictor variables. 
+
+```{r}
+# ANOVA including both predictors and interaction between predictors
+m4 <- lm(relBeakLength ~ as.factor(Primary.Lifestyle) + as.factor(Trophic.Level) + 
+           as.factor(Primary.Lifestyle):as.factor(Trophic.Level),data=Passeriformes)
+
+summary(m4)
+```
+
+M4, which includes the interaction term, is an improvement on the other models, explaining ~13% of the variance in relative beak length. In this model, all non interaction levels are significant. The interaction between insessorial and herbivore, generalist and omnivore, and insessorial and omnivore are significant. 
+
+Plot the interaction between the variables.
+
+```{r}
+interaction.plot(
+  x.factor = Passeriformes$Primary.Lifestyle,
+  xlab = "Primary Lifestyle",
+  trace.factor = Passeriformes$Trophic.Level,
+  trace.label = "Trophic level",
+  response = Passeriformes$relBeakLength,
+  fun = base::mean, # make sure we use {base} version
+  ylab = "Mean Relative Beak Length"
+)
+```
+
